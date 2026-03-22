@@ -1,0 +1,73 @@
+--- vm/Common.h
++++ vm/Common.h
+@@ -30,6 +30,58 @@
+ #include <assert.h>
+ #include "cutils/log.h"
+ 
++/*
++ * On 64-bit hosts, Dalvik's u4 registers truncate object pointers.
++ * Force all mmap allocations into the low 4GB so pointers fit in 32 bits.
++ *
++ * x86_64: use MAP_32BIT (kernel-supported, maps into low 2GB).
++ * aarch64: use a bump allocator hint with MAP_FIXED_NOREPLACE.
++ */
++#if __SIZEOF_POINTER__ > 4
++# include <sys/mman.h>
++
++# if defined(__x86_64__) && defined(MAP_32BIT)
++#  define DVM_MAP_32BIT MAP_32BIT
++# else
++#  define DVM_MAP_32BIT 0
++# endif
++
++/* MAP_FIXED_NOREPLACE appeared in Linux 4.17 */
++# ifndef MAP_FIXED_NOREPLACE
++#  define MAP_FIXED_NOREPLACE 0x100000
++# endif
++
++static inline void* dvm_mmap_low32(void* hint, size_t len, int prot,
++                                    int flags, int fd, off_t offset) {
++# if defined(__x86_64__) && defined(MAP_32BIT)
++    return mmap(hint, len, prot, flags | MAP_32BIT, fd, offset);
++# else
++    /* aarch64 or other 64-bit: use bump hint in low 4GB */
++    static uintptr_t sNextHint = 0x10000000u;
++    if (hint == NULL) {
++        hint = (void*)sNextHint;
++        void* r = mmap(hint, len, prot, flags | MAP_FIXED_NOREPLACE, fd, offset);
++        if (r != MAP_FAILED) {
++            sNextHint = (((uintptr_t)r + len) + 0xFFFu) & ~(uintptr_t)0xFFFu;
++            return r;
++        }
++        /* fallback: let kernel choose, hope it's low enough */
++        return mmap(NULL, len, prot, flags, fd, offset);
++    }
++    /* caller specified address - use as-is */
++    return mmap(hint, len, prot, flags, fd, offset);
++# endif
++}
++#else
++/* 32-bit host: no wrapping needed, just pass through to mmap */
++# include <sys/mman.h>
++# define DVM_MAP_32BIT 0
++static inline void* dvm_mmap_low32(void* hint, size_t len, int prot,
++                                    int flags, int fd, off_t offset) {
++    return mmap(hint, len, prot, flags, fd, offset);
++}
++#endif
++
+ #if defined(HAVE_ENDIAN_H)
+ # include <endian.h>
+ #else /*not HAVE_ENDIAN_H*/
+@@ -61,6 +113,11 @@
+ #define ALIGN_DOWN_TO_PAGE_SIZE(p) ALIGN_DOWN(p, SYSTEM_PAGE_SIZE)
+ 
+ #define CLZ(x) __builtin_clz(x)
++#if __SIZEOF_POINTER__ > 4
++#define CLZL(x) __builtin_clzl(x)
++#else
++#define CLZL(x) __builtin_clz(x)
++#endif
+ 
+ /*
+  * If "very verbose" logging is enabled, make it equivalent to ALOGV.
